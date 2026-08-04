@@ -1,8 +1,8 @@
 # =====================================================================
 # WAS705 Part II - Hardened, automated Firefly III v6.6.2 deployment.
-# Brought up by the deploy pipeline in a single scripted operation.
 # Stack: app (Firefly) + db (MariaDB) + cron + nginx (TLS reverse proxy).
 # The app is NOT published directly; only nginx exposes 80/443.
+# TLS cert is generated on the host by deploy.sh and bind-mounted in.
 # =====================================================================
 services:
   app:
@@ -45,12 +45,10 @@ services:
       - "443:443"
     volumes:
       - ./nginx/firefly.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/entrypoint.sh:/docker-entrypoint.d/99-gen-cert.sh:ro
-      - nginx_certs:/etc/nginx/certs
+      - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - app
 
 volumes:
   firefly_upload:
   firefly_db:
-  nginx_certs:
