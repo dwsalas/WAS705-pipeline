@@ -87,11 +87,12 @@ jobs:
     needs: [deploy, post-deploy-verify]
     if: always()
     runs-on: [self-hosted, on-prem]
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_DWSALAS }}
     steps:
       - name: Post remediation status to Discord
-        if: ${{ secrets.DISCORD_WEBHOOK_URL_DWSALAS != '' }}
+        if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_DWSALAS }}
           CSV: ${{ needs.post-deploy-verify.outputs.csv }}
           LOGIN: ${{ needs.post-deploy-verify.outputs.login }}
           INSTALL: ${{ needs.post-deploy-verify.outputs.install }}
