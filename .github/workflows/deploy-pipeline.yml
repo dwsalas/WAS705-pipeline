@@ -1,0 +1,108 @@
+# =====================================================================
+# WAS705 Part II - Automated secure deployment + post-deploy verification.
+# 1) deploy: patch exporter, ship hardened stack to the target, bring it up.
+# 2) verify: re-run the three previously-failing tests over HTTPS.
+# 3) notify: second, independent notification with remediation status.
+# Runs on the same self-hosted Kali runner as the assessment pipeline.
+# =====================================================================
+name: Secure Deploy Pipeline
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'deploy/**'
+      - '.github/workflows/deploy-pipeline.yml'
+
+env:
+  TARGET_HOST: 172.16.24.73
+  TARGET_USER: allan
+  TARGET_DIR: /home/allan/firefly-deploy
+  SSH_KEY: /home/kali/.ssh/pipeline_key
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, on-prem]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build patched exporter (INPV-21)
+        run: bash deploy/apply_csv_patch.sh
+      - name: Ship hardened stack to target
+        run: |
+          rsync -az -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=accept-new" \
+            deploy/ "${TARGET_USER}@${TARGET_HOST}:${TARGET_DIR}/"
+      - name: Deploy on target
+        run: |
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
+            "${TARGET_USER}@${TARGET_HOST}" "cd ${TARGET_DIR} && ./deploy.sh"
+
+  post-deploy-verify:
+    needs: deploy
+    runs-on: [self-hosted, on-prem]
+    outputs:
+      csv: ${{ steps.csv.outputs.result }}
+      login: ${{ steps.login.outputs.result }}
+      install: ${{ steps.install.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install requests --break-system-packages
+      # Self-signed TLS on the target: tests must not verify the cert chain.
+      - name: Re-verify CSV injection (expect PASS now)
+        id: csv
+        if: always()
+        env:
+          FIREFLY_BASE_URL: https://172.16.24.73
+          FIREFLY_API_TOKEN: ${{ secrets.FIREFLY_API_TOKEN_DWSALAS }}
+          PYTHONWARNINGS: ignore:Unverified HTTPS request
+          FIREFLY_VERIFY_TLS: "false"
+        run: |
+          set +e
+          python3 tests/test_csv_injection.py > /tmp/o.txt 2>&1; RC=$?
+          set -e; cat /tmp/o.txt
+          echo "result=**CSV Injection (INPV-21):** $(grep 'RESULT:' /tmp/o.txt | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Re-verify install endpoint (expect blocked)
+        id: install
+        if: always()
+        env:
+          FIREFLY_BASE_URL: https://172.16.24.73
+          FIREFLY_VERIFY_TLS: "false"
+        run: |
+          set +e
+          python3 tests/test_install_endpoint.py > /tmp/o.txt 2>&1; RC=$?
+          set -e; cat /tmp/o.txt
+          echo "result=**Install Endpoint (V-01):** $(grep 'RESULT:' /tmp/o.txt | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Re-verify login throttling (expect rate-limited)
+        id: login
+        if: always()
+        env:
+          FIREFLY_BASE_URL: https://172.16.24.73
+          FIREFLY_VERIFY_TLS: "false"
+        run: |
+          set +e
+          python3 tests/test_login_throttle.py > /tmp/o.txt 2>&1; RC=$?
+          set -e; cat /tmp/o.txt
+          echo "result=**Login Throttling:** $(grep 'RESULT:' /tmp/o.txt | tail -1)" >> "$GITHUB_OUTPUT"
+
+  notify:
+    needs: [deploy, post-deploy-verify]
+    if: always()
+    runs-on: [self-hosted, on-prem]
+    steps:
+      - name: Post remediation status to Discord
+        if: ${{ secrets.DISCORD_WEBHOOK_URL_DWSALAS != '' }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_DWSALAS }}
+          CSV: ${{ needs.post-deploy-verify.outputs.csv }}
+          LOGIN: ${{ needs.post-deploy-verify.outputs.login }}
+          INSTALL: ${{ needs.post-deploy-verify.outputs.install }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          PAYLOAD=$(python3 -c "
+          import json, os
+          body = '\n'.join(x for x in [
+            '✅ **Post-Deployment Verification**',
+            os.environ.get('CSV',''), os.environ.get('INSTALL',''), os.environ.get('LOGIN',''),
+            'Run: ' + os.environ.get('RUN_URL','')] if x)
+          print(json.dumps({'content': body}))
+          ")
+          curl -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK_URL"
